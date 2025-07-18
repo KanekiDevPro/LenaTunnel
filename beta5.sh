@@ -81,9 +81,9 @@ uninstall_all_vxlan() {
     for i in $(ip -d link show | grep -o 'vxlan[0-9]\+'); do
         ip link del $i 2>/dev/null
     done
-    rm -f /usr/local/bin/vxlan_bridge.sh /etc/ping_vxlan.sh
-    systemctl disable --now vxlan-tunnel.service 2>/dev/null
-    rm -f /etc/systemd/system/vxlan-tunnel.service
+    rm -f /usr/local/bin/vxlan_bridge*.sh /etc/ping_vxlan.sh
+    systemctl disable --now vxlan-tunnel*.service 2>/dev/null
+    rm -f /etc/systemd/system/vxlan-tunnel*.service
     systemctl daemon-reload
     # Stop and disable HAProxy service
     systemctl stop haproxy 2>/dev/null
@@ -204,7 +204,7 @@ while true; do
             # Remove any previous cronjobs for these services
             crontab -l 2>/dev/null | grep -v 'systemctl restart haproxy' | grep -v 'systemctl restart vxlan-tunnel' > /tmp/cron_tmp || true
             echo "0 */$cron_hours * * * systemctl restart haproxy >/dev/null 2>&1" >> /tmp/cron_tmp
-            echo "0 */$cron_hours * * * systemctl restart vxlan-tunnel >/dev/null 2>&1" >> /tmp/cron_tmp
+            echo "0 */$cron_hours * * * systemctl restart vxlan-tunnel*.service >/dev/null 2>&1" >> /tmp/cron_tmp
             crontab /tmp/cron_tmp
             rm /tmp/cron_tmp
             echo -e "${GREEN}Cronjob set successfully to restart haproxy and vxlan-tunnel every $cron_hours hour(s).${NC}"
@@ -234,14 +234,8 @@ echo "2- Kharej"
 read -p "Enter choice (1/2): " role_choice
 
 if [[ "$role_choice" == "1" ]]; then
-    read -p "Enter Kharej IPs (comma-separated, e.g., 192.168.1.1,192.168.1.2): " kharej_ips
-    read -p "Tunnel port (1 ~ 64435): " DSTPORT
-
-    # Port validation
-    if [[ ! $DSTPORT =~ ^[0-9]+$ ]] || (( DSTPORT < 1 || DSTPORT > 64435 )); then
-        echo "Invalid port. Aborting."
-        exit 1
-    fi
+    echo "Enter Kharej IPs and ports (format: IP:port,IP:port, e.g., 91.107.254.53:10515,91.107.137.30:10516)"
+    read -p "Kharej IPs and ports: " kharej_input
 
     # Strict input validation for haproxy_choice
     while true; do
@@ -264,12 +258,19 @@ if [[ "$role_choice" == "1" ]]; then
         echo -e "####################################"
     fi
 
-    # Split Kharej IPs into an array
-    IFS=',' read -ra KHAREJ_IP_ARRAY <<< "$kharej_ips"
-
-    # Setup VXLAN for each Kharej IP
+    # Parse Kharej IPs and ports
+    IFS=',' read -ra KHAREJ_ARRAY <<< "$kharej_input"
     ip_counter=1
-    for REMOTE_IP in "${KHAREJ_IP_ARRAY[@]}"; do
+    for entry in "${KHAREJ_ARRAY[@]}"; do
+        REMOTE_IP=${entry%%:*}
+        DSTPORT=${entry##*:}
+
+        # Validate IP and port
+        if [[ ! $REMOTE_IP =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ ! $DSTPORT =~ ^[0-9]+$ ]] || (( DSTPORT < 1 || DSTPORT > 64435 )); then
+            echo "Invalid IP ($REMOTE_IP) or port ($DSTPORT). Skipping this entry."
+            continue
+        fi
+
         VXLAN_IP="30.0.0.$ip_counter/24"
         VXLAN_IF="vxlan${VNI}_${ip_counter}"
 
