@@ -304,12 +304,15 @@ if [[ "$role_choice" == "1" ]]; then
         REMOTE_IP=${KHAREJ_IPS[$i]}
         DSTPORT=${KHAREJ_PORTS[$i]}
         VXLAN_IP="30.0.0.$ip_counter/24"
-        VXLAN_IF="vxlan${VNI}_${i+1}"
+        VXLAN_IF="vxlan${VNI}_$((i+1))"
         KHAREJ_VXLAN_IP="30.0.0.$((i+1))/24"  # Kharej server IPs are 30.0.0.1, 30.0.0.2, etc.
 
         # Detect default interface
         INTERFACE=$(ip route get 1.1.1.1 | awk '{print $5}' | head -n1)
         echo "Detected main interface: $INTERFACE"
+
+        # Remove existing VXLAN interface if it exists
+        ip link del $VXLAN_IF 2>/dev/null || true
 
         # Setup VXLAN
         echo "[+] Creating VXLAN interface $VXLAN_IF for Kharej server $REMOTE_IP..."
@@ -326,8 +329,9 @@ if [[ "$role_choice" == "1" ]]; then
 
         # Create systemd service script for this VXLAN
         echo "[+] Creating systemd service for VXLAN $VXLAN_IF..."
-        cat <<EOF > /usr/local/bin/vxlan_bridge_${i+1}.sh
+        cat <<EOF > /usr/local/bin/vxlan_bridge_$((i+1)).sh
 #!/bin/bash
+ip link del $VXLAN_IF 2>/dev/null || true
 ip link add $VXLAN_IF type vxlan id $VNI local $(hostname -I | awk '{print $1}') remote $REMOTE_IP dev $INTERFACE dstport $DSTPORT nolearning
 ip addr add $VXLAN_IP dev $VXLAN_IF
 ip link set $VXLAN_IF up
@@ -335,15 +339,15 @@ ip link set $VXLAN_IF up
 ( while true; do ping -c 1 $REMOTE_IP >/dev/null 2>&1; sleep 30; done ) &
 EOF
 
-        chmod +x /usr/local/bin/vxlan_bridge_${i+1}.sh
+        chmod +x /usr/local/bin/vxlan_bridge_$((i+1)).sh
 
-        cat <<EOF > /etc/systemd/system/vxlan-tunnel-${i+1}.service
+        cat <<EOF > /etc/systemd/system/vxlan-tunnel-$((i+1)).service
 [Unit]
-Description=VXLAN Tunnel Interface ${i+1}
+Description=VXLAN Tunnel Interface $((i+1))
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/vxlan_bridge_${i+1}.sh
+ExecStart=/usr/local/bin/vxlan_bridge_$((i+1)).sh
 Type=oneshot
 RemainAfterExit=yes
 
@@ -351,11 +355,11 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 EOF
 
-        chmod 644 /etc/systemd/system/vxlan-tunnel-${i+1}.service
+        chmod 644 /etc/systemd/system/vxlan-tunnel-$((i+1)).service
         systemctl daemon-reexec
         systemctl daemon-reload
-        systemctl enable vxlan-tunnel-${i+1}.service
-        systemctl start vxlan-tunnel-${i+1}.service
+        systemctl enable vxlan-tunnel-$((i+1)).service
+        systemctl start vxlan-tunnel-$((i+1)).service
 
         echo -e "\n${GREEN}[✓] VXLAN tunnel $VXLAN_IF enabled to run on boot.${NC}"
 
@@ -371,6 +375,11 @@ EOF
     done
 
     echo "[✓] VXLAN tunnel setup for all Kharej servers completed successfully."
+
+    # Display final interface status
+    echo "[*] Current VXLAN interfaces on Iran server:"
+    ip -brief link show | grep vxlan
+    ip -brief addr show | grep vxlan
 
 elif [[ "$role_choice" == "2" ]]; then
     read -p "Enter IRAN IP: " IRAN_IP
@@ -421,6 +430,7 @@ elif [[ "$role_choice" == "2" ]]; then
     echo "[+] Creating systemd service for VXLAN..."
     cat <<EOF > /usr/local/bin/vxlan_bridge.sh
 #!/bin/bash
+ip link del $VXLAN_IF 2>/dev/null || true
 ip link add $VXLAN_IF type vxlan id $VNI local $(hostname -I | awk '{print $1}') remote $REMOTE_IP dev $INTERFACE dstport $DSTPORT nolearning
 ip addr add $VXLAN_IP/24 dev $VXLAN_IF
 ip link set $VXLAN_IF up
@@ -460,6 +470,11 @@ EOF
     else
         echo -e "${YELLOW}[!] Ping to $REMOTE_IP failed. Check network, firewall, or VXLAN configuration.${NC}"
     fi
+
+    # Display interface status
+    echo "[*] Current VXLAN interface on Kharej server:"
+    ip -brief link show | grep vxlan
+    ip -brief addr show | grep vxlan
 
 else
     echo "[x] Invalid role selected."
