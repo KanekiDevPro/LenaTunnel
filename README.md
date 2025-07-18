@@ -19,7 +19,7 @@ Lena is a fast, lightweight and intelligent tunnel that provides a stable and se
 
 # Install script
 ```
-bash <(curl -Ls https://raw.githubusercontent.com/MrAminiDev/LenaTunnel/main/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/KanekiDevPro/LenaTunnel/main/install.sh)
 ```
 
 ## Support the project with cryptocurrency
