@@ -334,6 +334,7 @@ if [[ "$role_choice" == "1" ]]; then
 ip link del $VXLAN_IF 2>/dev/null || true
 ip link add $VXLAN_IF type vxlan id $VNI local $(hostname -I | awk '{print $1}') remote $REMOTE_IP dev $INTERFACE dstport $DSTPORT nolearning
 ip addr add $VXLAN_IP dev $VXLAN_IF
+ip link set $VXLAN_IF mtu 1400
 ip link set $VXLAN_IF up
 # Persistent keepalive: ping remote every 30s in background
 ( while true; do ping -c 1 $REMOTE_IP >/dev/null 2>&1; sleep 30; done ) &
@@ -369,6 +370,10 @@ EOF
             echo -e "${GREEN}[✓] Ping to $KHAREJ_VXLAN_IP successful.${NC}"
         else
             echo -e "${YELLOW}[!] Ping to $KHAREJ_VXLAN_IP failed. Check network, firewall, or VXLAN configuration.${NC}"
+            echo "[*] VXLAN details for $VXLAN_IF:"
+            ip -d link show $VXLAN_IF
+            echo "[*] Testing UDP connectivity to $REMOTE_IP:$DSTPORT..."
+            nc -u -z $REMOTE_IP $DSTPORT && echo -e "${GREEN}[✓] UDP port $DSTPORT open.${NC}" || echo -e "${YELLOW}[!] UDP port $DSTPORT not reachable.${NC}"
         fi
 
         ((ip_counter++))
@@ -419,6 +424,7 @@ elif [[ "$role_choice" == "2" ]]; then
 
     echo "[+] Assigning IP $VXLAN_IP/24 to $VXLAN_IF"
     ip addr add $VXLAN_IP/24 dev $VXLAN_IF
+    ip link set $VXLAN_IF mtu 1400
     ip link set $VXLAN_IF up
 
     echo "[+] Adding iptables rules"
@@ -433,6 +439,7 @@ elif [[ "$role_choice" == "2" ]]; then
 ip link del $VXLAN_IF 2>/dev/null || true
 ip link add $VXLAN_IF type vxlan id $VNI local $(hostname -I | awk '{print $1}') remote $REMOTE_IP dev $INTERFACE dstport $DSTPORT nolearning
 ip addr add $VXLAN_IP/24 dev $VXLAN_IF
+ip link set $VXLAN_IF mtu 1400
 ip link set $VXLAN_IF up
 # Persistent keepalive: ping remote every 30s in background
 ( while true; do ping -c 1 $REMOTE_IP >/dev/null 2>&1; sleep 30; done ) &
@@ -469,6 +476,10 @@ EOF
         echo -e "${GREEN}[✓] Ping to $REMOTE_IP successful.${NC}"
     else
         echo -e "${YELLOW}[!] Ping to $REMOTE_IP failed. Check network, firewall, or VXLAN configuration.${NC}"
+        echo "[*] VXLAN details for $VXLAN_IF:"
+        ip -d link show $VXLAN_IF
+        echo "[*] Testing UDP connectivity to $REMOTE_IP:$DSTPORT..."
+        nc -u -z $REMOTE_IP $DSTPORT && echo -e "${GREEN}[✓] UDP port $DSTPORT open.${NC}" || echo -e "${YELLOW}[!] UDP port $DSTPORT not reachable.${NC}"
     fi
 
     # Display interface status
