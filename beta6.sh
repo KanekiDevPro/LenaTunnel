@@ -153,7 +153,6 @@ EOL
 
     for port in "${ports[@]}"; do
         cat <<EOL >> "$CONFIG_FILE"
-
 frontend frontend_$port
     bind *:$port
     default_backend backend_$port
@@ -225,7 +224,7 @@ fi
 
 # ------------- VARIABLES --------------
 VNI=88
-VXLAN_IF="vxlan${VNI}"
+BASE_VXLAN_IP=3  # Start Iran VXLAN IPs from 30.0.0.3
 
 # --------- Choose Server Role ----------
 echo "Choose server role:"
@@ -234,8 +233,41 @@ echo "2- Kharej"
 read -p "Enter choice (1/2): " role_choice
 
 if [[ "$role_choice" == "1" ]]; then
-    echo "Enter Kharej IPs and ports (format: IP:port,IP:port, e.g., 91.107.254.53:10515,91.107.137.30:10516)"
-    read -p "Kharej IPs and ports: " kharej_input
+    # Prompt for number of Kharej servers
+    while true; do
+        read -p "How many Kharej servers to configure? (1 or more): " kharej_count
+        if [[ $kharej_count =~ ^[0-9]+$ ]] && (( kharej_count >= 1 )); then
+            break
+        else
+            echo "Invalid input. Please enter a number greater than or equal to 1."
+        fi
+    done
+
+    # Arrays to store Kharej IPs and ports
+    declare -a KHAREJ_IPS
+    declare -a KHAREJ_PORTS
+
+    # Prompt for each Kharej server's IP and port
+    for ((i=1; i<=kharej_count; i++)); do
+        while true; do
+            read -p "Enter Kharej server $i IP: " kharej_ip
+            if [[ $kharej_ip =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                break
+            else
+                echo "Invalid IP address. Try again."
+            fi
+        done
+        while true; do
+            read -p "Enter Kharej server $i port (1 ~ 64435): " kharej_port
+            if [[ $kharej_port =~ ^[0-9]+$ ]] && (( kharej_port >= 1 && kharej_port <= 64435 )); then
+                break
+            else
+                echo "Invalid port. Try again."
+            fi
+        done
+        KHAREJ_IPS+=("$kharej_ip")
+        KHAREJ_PORTS+=("$kharej_port")
+    done
 
     # Strict input validation for haproxy_choice
     while true; do
@@ -254,35 +286,28 @@ if [[ "$role_choice" == "1" ]]; then
         echo "IRAN Server setup complete."
         echo -e "####################################"
         echo -e "# Your IPv4 :                      #"
-        echo -e "#  30.0.0.1                     #"
+        echo -e "#  30.0.0.$BASE_VXLAN_IP           #"
         echo -e "####################################"
     fi
 
-    # Parse Kharej IPs and ports
-    IFS=',' read -ra KHAREJ_ARRAY <<< "$kharej_input"
-    ip_counter=1
-    for entry in "${KHAREJ_ARRAY[@]}"; do
-        REMOTE_IP=${entry%%:*}
-        DSTPORT=${entry##*:}
-
-        # Validate IP and port
-        if [[ ! $REMOTE_IP =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ ! $DSTPORT =~ ^[0-9]+$ ]] || (( DSTPORT < 1 || DSTPORT > 64435 )); then
-            echo "Invalid IP ($REMOTE_IP) or port ($DSTPORT). Skipping this entry."
-            continue
-        fi
-
+    # Setup VXLAN for each Kharej server
+    ip_counter=$BASE_VXLAN_IP
+    for ((i=0; i<${#KHAREJ_IPS[@]}; i++)); do
+        REMOTE_IP=${KHAREJ_IPS[$i]}
+        DSTPORT=${KHAREJ_PORTS[$i]}
         VXLAN_IP="30.0.0.$ip_counter/24"
-        VXLAN_IF="vxlan${VNI}_${ip_counter}"
+        VXLAN_IF="vxlan${VNI}_${i+1}"
+        KHAREJ_VXLAN_IP="30.0.0.$((i+1))/24"  # Kharej server IPs are 30.0.0.1, 30.0.0.2, etc.
 
         # Detect default interface
         INTERFACE=$(ip route get 1.1.1.1 | awk '{print $5}' | head -n1)
         echo "Detected main interface: $INTERFACE"
 
         # Setup VXLAN
-        echo "[+] Creating VXLAN interface $VXLAN_IF..."
+        echo "[+] Creating VXLAN interface $VXLAN_IF for Kharej server $REMOTE_IP..."
         ip link add $VXLAN_IF type vxlan id $VNI local $(hostname -I | awk '{print $1}') remote $REMOTE_IP dev $INTERFACE dstport $DSTPORT nolearning
 
-        echo "[+] Assigning IP $VXLAN_IP to $VXLAN_IF"
+        echo "[+] Assigning IP $VXLAN_IP to $VXLAN_IF (connects to Kharej $KHAREJ_VXLAN_IP)"
         ip addr add $VXLAN_IP dev $VXLAN_IF
         ip link set $VXLAN_IF up
 
@@ -293,7 +318,7 @@ if [[ "$role_choice" == "1" ]]; then
 
         # Create systemd service script for this VXLAN
         echo "[+] Creating systemd service for VXLAN $VXLAN_IF..."
-        cat <<EOF > /usr/local/bin/vxlan_bridge_${ip_counter}.sh
+        cat <<EOF > /usr/local/bin/vxlan_bridge_${i+1}.sh
 #!/bin/bash
 ip link add $VXLAN_IF type vxlan id $VNI local $(hostname -I | awk '{print $1}') remote $REMOTE_IP dev $INTERFACE dstport $DSTPORT nolearning
 ip addr add $VXLAN_IP dev $VXLAN_IF
@@ -302,15 +327,15 @@ ip link set $VXLAN_IF up
 ( while true; do ping -c 1 $REMOTE_IP >/dev/null 2>&1; sleep 30; done ) &
 EOF
 
-        chmod +x /usr/local/bin/vxlan_bridge_${ip_counter}.sh
+        chmod +x /usr/local/bin/vxlan_bridge_${i+1}.sh
 
-        cat <<EOF > /etc/systemd/system/vxlan-tunnel-${ip_counter}.service
+        cat <<EOF > /etc/systemd/system/vxlan-tunnel-${i+1}.service
 [Unit]
-Description=VXLAN Tunnel Interface $ip_counter
+Description=VXLAN Tunnel Interface ${i+1}
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/vxlan_bridge_${ip_counter}.sh
+ExecStart=/usr/local/bin/vxlan_bridge_${i+1}.sh
 Type=oneshot
 RemainAfterExit=yes
 
@@ -318,11 +343,11 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 EOF
 
-        chmod 644 /etc/systemd/system/vxlan-tunnel-${ip_counter}.service
+        chmod 644 /etc/systemd/system/vxlan-tunnel-${i+1}.service
         systemctl daemon-reexec
         systemctl daemon-reload
-        systemctl enable vxlan-tunnel-${ip_counter}.service
-        systemctl start vxlan-tunnel-${ip_counter}.service
+        systemctl enable vxlan-tunnel-${i+1}.service
+        systemctl start vxlan-tunnel-${i+1}.service
 
         echo -e "\n${GREEN}[✓] VXLAN tunnel $VXLAN_IF enabled to run on boot.${NC}"
         ((ip_counter++))
