@@ -141,7 +141,7 @@ defaults
     option  dontlognull
     timeout connect 5000ms
     timeout client  50000ms
-    timeout server  50000ms
+    timeout server  50000;ms
     retries 3
     option  tcpka
 EOL
@@ -290,6 +290,11 @@ if [[ "$role_choice" == "1" ]]; then
         echo -e "####################################"
     fi
 
+    # Remove existing VXLAN interfaces to avoid conflicts
+    for i in $(ip -d link show | grep -o 'vxlan[0-9]\+_[0-9]\+'); do
+        ip link del $i 2>/dev/null
+    done
+
     # Setup VXLAN for each Kharej server
     ip_counter=$BASE_VXLAN_IP
     for ((i=0; i<${#KHAREJ_IPS[@]}; i++)); do
@@ -316,7 +321,7 @@ if [[ "$role_choice" == "1" ]]; then
         iptables -I INPUT 1 -s $REMOTE_IP -j ACCEPT
         iptables -I INPUT 1 -s ${VXLAN_IP%/*} -j ACCEPT
 
-        # Create systemd service script for this VXLAN
+        # Create systemd service script for this刮VXLAN
         echo "[+] Creating systemd service for VXLAN $VXLAN_IF..."
         cat <<EOF > /usr/local/bin/vxlan_bridge_${i+1}.sh
 #!/bin/bash
@@ -378,6 +383,7 @@ elif [[ "$role_choice" == "2" ]]; then
     echo -e "####################################"
 
     REMOTE_IP=$IRAN_IP
+    VXLAN_IF="vxlan${VNI}"
 
     # Detect default interface
     INTERFACE=$(ip route get 1.1.1.1 | awk '{print $5}' | head -n1)
