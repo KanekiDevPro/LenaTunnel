@@ -78,6 +78,9 @@ Lena_menu() {
 
 uninstall_all_vxlan() {
     echo "[!] Deleting all VXLAN interfaces and cleaning up..."
+    for i in $(ip -d link show | grep -o 'vxlan[0-9]\+_[0-9]\+'); do
+        ip link del $i 2>/dev/null
+    done
     for i in $(ip -d link show | grep -o 'vxlan[0-9]\+'); do
         ip link del $i 2>/dev/null
     done
@@ -141,7 +144,7 @@ defaults
     option  dontlognull
     timeout connect 5000ms
     timeout client  50000ms
-    timeout server  50000;ms
+    timeout server  50000ms
     retries 3
     option  tcpka
 EOL
@@ -319,9 +322,9 @@ if [[ "$role_choice" == "1" ]]; then
         echo "[+] Adding iptables rules for $REMOTE_IP"
         iptables -I INPUT 1 -p udp --dport $DSTPORT -j ACCEPT
         iptables -I INPUT 1 -s $REMOTE_IP -j ACCEPT
-        iptables -I INPUT 1 -s ${VXLAN_IP%/*} -j ACCEPT
+        iptables -I INPUT 1 -s ${KHAREJ_VXLAN_IP%/*} -j ACCEPT
 
-        # Create systemd service script for this刮VXLAN
+        # Create systemd service script for this VXLAN
         echo "[+] Creating systemd service for VXLAN $VXLAN_IF..."
         cat <<EOF > /usr/local/bin/vxlan_bridge_${i+1}.sh
 #!/bin/bash
@@ -355,6 +358,15 @@ EOF
         systemctl start vxlan-tunnel-${i+1}.service
 
         echo -e "\n${GREEN}[✓] VXLAN tunnel $VXLAN_IF enabled to run on boot.${NC}"
+
+        # Test connectivity
+        echo "[*] Testing connectivity to Kharej $KHAREJ_VXLAN_IP..."
+        if ping -c 3 ${KHAREJ_VXLAN_IP%/*} >/dev/null 2>&1; then
+            echo -e "${GREEN}[✓] Ping to $KHAREJ_VXLAN_IP successful.${NC}"
+        else
+            echo -e "${YELLOW}[!] Ping to $KHAREJ_VXLAN_IP failed. Check network, firewall, or VXLAN configuration.${NC}"
+        fi
+
         ((ip_counter++))
     done
 
@@ -379,7 +391,7 @@ elif [[ "$role_choice" == "2" ]]; then
     echo "Kharej Server setup complete."
     echo -e "####################################"
     echo -e "# Your IPv4 :                      #"
-    echo -e "#  $VXLAN_IP                     #"
+    echo -e "#  $VXLAN_IP                       #"
     echo -e "####################################"
 
     REMOTE_IP=$IRAN_IP
@@ -389,12 +401,15 @@ elif [[ "$role_choice" == "2" ]]; then
     INTERFACE=$(ip route get 1.1.1.1 | awk '{print $5}' | head -n1)
     echo "Detected main interface: $INTERFACE"
 
+    # Remove existing VXLAN interface to avoid conflicts
+    ip link del $VXLAN_IF 2>/dev/null || true
+
     # Setup VXLAN
     echo "[+] Creating VXLAN interface $VXLAN_IF..."
     ip link add $VXLAN_IF type vxlan id $VNI local $(hostname -I | awk '{print $1}') remote $REMOTE_IP dev $INTERFACE dstport $DSTPORT nolearning
 
-    echo "[+] Assigning IP $VXLAN_IP to $VXLAN_IF"
-    ip addr add $VXLAN_IP dev $VXLAN_IF
+    echo "[+] Assigning IP $VXLAN_IP/24 to $VXLAN_IF"
+    ip addr add $VXLAN_IP/24 dev $VXLAN_IF
     ip link set $VXLAN_IF up
 
     echo "[+] Adding iptables rules"
@@ -407,7 +422,7 @@ elif [[ "$role_choice" == "2" ]]; then
     cat <<EOF > /usr/local/bin/vxlan_bridge.sh
 #!/bin/bash
 ip link add $VXLAN_IF type vxlan id $VNI local $(hostname -I | awk '{print $1}') remote $REMOTE_IP dev $INTERFACE dstport $DSTPORT nolearning
-ip addr add $VXLAN_IP dev $VXLAN_IF
+ip addr add $VXLAN_IP/24 dev $VXLAN_IF
 ip link set $VXLAN_IF up
 # Persistent keepalive: ping remote every 30s in background
 ( while true; do ping -c 1 $REMOTE_IP >/dev/null 2>&1; sleep 30; done ) &
@@ -437,6 +452,14 @@ EOF
 
     echo -e "\n${GREEN}[✓] VXLAN tunnel service enabled to run on boot.${NC}"
     echo "[✓] VXLAN tunnel setup completed successfully."
+
+    # Test connectivity
+    echo "[*] Testing connectivity to Iran ${REMOTE_IP}..."
+    if ping -c 3 $REMOTE_IP >/dev/null 2>&1; then
+        echo -e "${GREEN}[✓] Ping to $REMOTE_IP successful.${NC}"
+    else
+        echo -e "${YELLOW}[!] Ping to $REMOTE_IP failed. Check network, firewall, or VXLAN configuration.${NC}"
+    fi
 
 else
     echo "[x] Invalid role selected."
