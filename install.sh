@@ -1,44 +1,34 @@
 #!/bin/bash
 
-# ---------------- INSTALL DEPENDENCIES ----------------
-echo "[*] Updating package list..."
-sudo apt update -y
-
-echo "[*] Installing iproute2..."
-sudo apt install -y iproute2
-
-echo "[*] Installing net-tools..."
-sudo apt install -y net-tools
-
-echo "[*] Installing grep..."
-sudo apt install -y grep
-
-echo "[*] Installing awk..."
-sudo apt install -y awk
-
-echo "[*] Installing sudo..."
-sudo apt install -y sudo
-
-echo "[*] Installing iputils-ping..."
-sudo apt install -y iputils-ping
-
-echo "[*] Installing jq..."
-sudo apt install -y jq
-
-echo "[*] Installing Curl..."
-sudo apt install -y curl
-
-echo "[*] Installing Haproxy..."
-sudo apt install -y haproxy
-
-echo "[*] Installing Iptables..."
-sudo apt install iptables
-
 # ---------------- COLORS ----------------
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 MAGENTA='\033[0;35m'
 NC='\033[0m'
+
+# ---------------- CHECK ROOT ----------------
+if [[ $EUID -ne 0 ]]; then
+    echo -e "${YELLOW}[!] This script must be run as root.${NC}"
+    echo -e "${YELLOW}[!] Please use 'sudo' or switch to root user.${NC}"
+    exit 1
+fi
+
+# ---------------- FAST DEPENDENCY CHECK ----------------
+DEPS_MARKER="/etc/.lena_deps_installed"
+if [[ ! -f "$DEPS_MARKER" ]]; then
+    echo -e "${YELLOW}[*] Checking and installing dependencies (first run only)...${NC}"
+    apt-get update -y -qq
+    for pkg in iproute2 net-tools grep awk iputils-ping jq curl iptables; do
+        if ! command -v $pkg &> /dev/null; then
+            echo -e "${YELLOW}[*] Installing $pkg...${NC}"
+            apt-get install -y -qq $pkg
+        fi
+    done
+    touch "$DEPS_MARKER"
+else
+    echo -e "${GREEN}[✓] Dependencies already installed. Skipping check.${NC}"
+fi
+
 
 # ---------------- FUNCTIONS ----------------
 
@@ -58,8 +48,8 @@ Lena_menu() {
     echo "|| |     ___ _ __   __ _ 									|"
     echo "|| |    / _ \ '_ \ / _  |									|"
     echo "|| |___|  __/ | | | (_| |									|"
-    echo "|\_____/\___|_| |_|\__,_|	V1.0.0			            |" 
-    echo "+-------------------------------------------------------------------------+"    
+    echo "|\_____/\___|_| |_|\__,_|	V1.1.0		    	            |"
+    echo "+-------------------------------------------------------------------------+"
     echo -e "| Telegram Channel : ${MAGENTA}@AminiDev ${NC}| Version : ${GREEN} 1.0.0 ${NC} "
     echo "+-------------------------------------------------------------------------+"
     echo -e "|${GREEN}Server Country    |${NC} $SERVER_COUNTRY"
@@ -70,29 +60,109 @@ Lena_menu() {
     echo "+-------------------------------------------------------------------------+"
     echo -e "1- Install new tunnel"
     echo -e "2- Uninstall tunnel(s)"
-    echo -e "3- Install BBR"
-    echo -e "4- Cronjob settings"
+    echo -e "3- Edit tunnel"
+    echo -e "4- Install BBR"
+    echo -e "5- Cronjob settings"
     echo -e "0- Exit"
     echo "+-------------------------------------------------------------------------+"
     echo -e "\033[0m"
 }
+
+# ---------------- EDIT VXLAN TUNNEL ----------------
+edit_vxlan_tunnel() {
+    local BRIDGE_FILE="/usr/local/bin/vxlan_bridge.sh"
+    local HAPROXY_CFG="/etc/haproxy/haproxy.cfg"
+
+    # --- Retrieve current settings ---
+    local VXLAN_IF VNI CUR_REMOTE CUR_LOCAL CUR_PORT
+    if [[ -f "$BRIDGE_FILE" ]]; then
+        CUR_REMOTE=$(grep -oP 'remote \K[^ ]+' "$BRIDGE_FILE")
+        CUR_LOCAL=$(grep -oP 'ip addr add \K[^ ]+' "$BRIDGE_FILE")
+        CUR_PORT=$(grep -oP 'dstport \K[^ ]+' "$BRIDGE_FILE")
+        VXLAN_IF=$(grep -oP 'dev \K[^ ]+' "$BRIDGE_FILE" | head -n1)
+        VNI=$(grep -oP 'vxlan id \K[^ ]+' "$BRIDGE_FILE")
+    fi
+
+    echo "=== Edit VXLAN Tunnel ==="
+    # --- Prompt for new values (default to current) ---
+    read -p "Remote IP [$CUR_REMOTE]: " NEW_REMOTE
+    NEW_REMOTE=${NEW_REMOTE:-$CUR_REMOTE}
+    read -p "Local VXLAN IP (e.g. 10.0.1.15/24) [$CUR_LOCAL]: " NEW_LOCAL
+    NEW_LOCAL=${NEW_LOCAL:-$CUR_LOCAL}
+    [[ "$NEW_LOCAL" != */* ]] && NEW_LOCAL="$NEW_LOCAL/24"
+    read -p "VXLAN Port [$CUR_PORT]: " NEW_PORT
+    NEW_PORT=${NEW_PORT:-$CUR_PORT}
+
+    # --- Validate inputs ---
+    if [[ -z "$NEW_REMOTE" || -z "$NEW_LOCAL" || -z "$NEW_PORT" ]]; then
+        echo "[x] Error: All fields are required."
+        return
+    fi
+
+    # --- Remove existing interface and any lingering IPs ---
+    if ip link show "$VXLAN_IF" &>/dev/null; then
+        echo "[*] Deleting existing interface $VXLAN_IF"
+        ip link del "$VXLAN_IF"
+    else
+        # flush any old IPs if interface exists in namespace
+        ip addr flush dev "$VXLAN_IF" 2>/dev/null || true
+    fi
+
+    # --- Create and configure new VXLAN ---
+    local IFACE=$(ip route get 1.1.1.1 | awk '{print $5}' | head -n1)
+    local HOST_IP=$(hostname -I | awk '{print $1}')
+    echo "[*] Creating VXLAN interface $VXLAN_IF with ID $VNI"
+    ip link add "$VXLAN_IF" type vxlan id "$VNI" \
+        local "$HOST_IP" remote "$NEW_REMOTE" \
+        dev "$IFACE" dstport "$NEW_PORT" nolearning
+    echo "[*] Assigning IP $NEW_LOCAL to $VXLAN_IF"
+    ip addr add "$NEW_LOCAL" dev "$VXLAN_IF"
+    ip link set "$VXLAN_IF" up
+
+    # --- Update bridge script for persistence ---
+    if [[ -f "$BRIDGE_FILE" ]]; then
+        sed -i "s|remote [^ ]\+|remote $NEW_REMOTE|" "$BRIDGE_FILE"
+        sed -i "s|ip addr add [^ ]\+|ip addr add $NEW_LOCAL|" "$BRIDGE_FILE"
+        sed -i "s|dstport [^ ]\+|dstport $NEW_PORT|" "$BRIDGE_FILE"
+    fi
+
+    # --- Update HAProxy backend IP if configured ---
+    if [[ -f "$HAPROXY_CFG" ]]; then
+        local OLD_IP="${CUR_LOCAL%%/*}"
+        local NEW_IP="${NEW_LOCAL%%/*}"
+        if [[ "$OLD_IP" != "$NEW_IP" ]]; then
+            echo "[*] Replacing HAProxy IP: $OLD_IP -> $NEW_IP"
+            sed -i "s/$OLD_IP/$NEW_IP/g" "$HAPROXY_CFG"
+            systemctl restart haproxy
+        fi
+    fi
+
+    # --- Restart VXLAN service ---
+    echo "[*] Restarting VXLAN tunnel service"
+    systemctl restart vxlan-tunnel.service
+
+    echo -e "${GREEN}[✓] VXLAN tunnel updated and all services restarted.${NC}"
+}
+
 
 uninstall_all_vxlan() {
     echo "[!] Deleting all VXLAN interfaces and cleaning up..."
     for i in $(ip -d link show | grep -o 'vxlan[0-9]\+'); do
         ip link del $i 2>/dev/null
     done
-    rm -f /usr/local/bin/vxlan_bridge.sh /etc/ping_vxlan.sh
-    systemctl disable --now vxlan-tunnel.service 2>/dev/null
-    rm -f /etc/systemd/system/vxlan-tunnel.service
+
+    systemctl stop haproxy vxlan-tunnel 2>/dev/null
+    systemctl disable haproxy vxlan-tunnel 2>/dev/null
+
+    rm -f /usr/local/bin/vxlan_bridge.sh /etc/ping_vxlan.sh /etc/systemd/system/vxlan-tunnel.service
+
     systemctl daemon-reload
-    # Stop and disable HAProxy service
-    systemctl stop haproxy 2>/dev/null
-    systemctl disable haproxy 2>/dev/null
+
     # Remove HAProxy package
-    apt remove -y haproxy 2>/dev/null
-    apt purge -y haproxy 2>/dev/null
+    apt remove -y haproxy -qq
+    apt purge -y haproxy -qq
     apt autoremove -y 2>/dev/null
+
     # Remove related cronjobs
     crontab -l 2>/dev/null | grep -v 'systemctl restart haproxy' | grep -v 'systemctl restart vxlan-tunnel' | grep -v '/etc/ping_vxlan.sh' > /tmp/cron_tmp || true
     crontab /tmp/cron_tmp
@@ -102,9 +172,7 @@ uninstall_all_vxlan() {
 
 install_bbr() {
     echo "Running BBR script..."
-    curl -fsSL https://raw.githubusercontent.com/MrAminiDev/NetOptix/main/scripts/bbr.sh -o /tmp/bbr.sh
-    bash /tmp/bbr.sh
-    rm /tmp/bbr.sh
+    curl -fsSLk https://raw.githubusercontent.com/MrAminiDev/NetOptix/main/scripts/bbr.sh | bash
 }
 
 install_haproxy_and_configure() {
@@ -113,11 +181,11 @@ install_haproxy_and_configure() {
     # Ensure haproxy is installed
     if ! command -v haproxy >/dev/null 2>&1; then
         echo "[x] HAProxy is not installed. Installing..."
-        sudo apt update && sudo apt install -y haproxy
+        apt update -qq && apt install -y haproxy -qq
     fi
 
     # Ensure config directory exists
-    sudo mkdir -p /etc/haproxy
+    mkdir -p /etc/haproxy
 
     # Default HAProxy config file
     local CONFIG_FILE="/etc/haproxy/haproxy.cfg"
@@ -169,8 +237,7 @@ EOL
     # Validate haproxy config
     if haproxy -c -f "$CONFIG_FILE"; then
         echo "[*] Restarting HAProxy service..."
-        systemctl restart haproxy
-        systemctl enable haproxy
+        systemctl enable haproxy && systemctl restart haproxy
         echo -e "${GREEN}HAProxy configured and restarted successfully.${NC}"
     else
         echo -e "${YELLOW}Warning: HAProxy configuration is invalid!${NC}"
@@ -180,7 +247,7 @@ EOL
 # ---------------- MAIN ----------------
 while true; do
     Lena_menu
-    read -p "Enter your choice [0-4]: " main_action
+    read -p "Enter your choice [0-5]: " main_action
     case $main_action in
         0)
             echo "Exiting..."
@@ -194,10 +261,13 @@ while true; do
             read -p "Press Enter to return to menu..."
             ;;
         3)
+            edit_vxlan_tunnel
+            ;;
+        4)
             install_bbr
             read -p "Press Enter to return to menu..."
             ;;
-        4)
+        5)
             while true; do
                 clear
                 echo "+-----------------------------+"
@@ -215,7 +285,6 @@ while true; do
                             if [[ "$cron_hours" == "b" || "$cron_hours" == "B" ]]; then
                                 break
                             elif [[ $cron_hours =~ ^[0-9]+$ ]] && (( cron_hours >= 1 && cron_hours <= 24 )); then
-                                # Remove any previous cronjobs for these services
                                 crontab -l 2>/dev/null | grep -v 'systemctl restart haproxy' | grep -v 'systemctl restart vxlan-tunnel' > /tmp/cron_tmp || true
                                 echo "0 */$cron_hours * * * systemctl restart haproxy >/dev/null 2>&1" >> /tmp/cron_tmp
                                 echo "0 */$cron_hours * * * systemctl restart vxlan-tunnel >/dev/null 2>&1" >> /tmp/cron_tmp
@@ -279,6 +348,7 @@ while true; do
             sleep 1
             ;;
     esac
+
 done
 
 # Check if ip command is available
